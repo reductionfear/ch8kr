@@ -7,13 +7,13 @@
 
 import axios, { AxiosRequestConfig } from 'axios';
 
-// Environment variables (replace hardcoded keys from Python)
-const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY || '';
-const STRIPE_KEY = process.env.STRIPE_KEY || '';
+// Environment variables with working defaults from legacy Python bot (t2.py)
+const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY || 'AIzaSyCX5msqd223t0ZQgM3URQzLenKrmoQipIA';
+const STRIPE_KEY = process.env.STRIPE_KEY || 'pk_live_51KN2QBB88RUu9OnVkyDTgsNCOgqFUVLLB5irQwiB10vXMFUaTOLAjQC6Tu6ESXyBHuVLKy0QJaLzsNrUiIjKII1j00yJp8Pta3';
 
 // Billing and shipping constants (from Python)
 const BILLING_NAME = process.env.BILLING_NAME || 'james';
-const BILLING_EMAIL = process.env.BILLING_EMAIL || 'test@example.com';
+const BILLING_EMAIL = process.env.BILLING_EMAIL || 'ogggvime@telegmail.com';
 const BILLING_ADDRESS_LINE1 = process.env.BILLING_ADDRESS_LINE1 || '6728 County Road 3 1/4';
 const BILLING_CITY = process.env.BILLING_CITY || 'Erie';
 const BILLING_STATE = process.env.BILLING_STATE || 'CO';
