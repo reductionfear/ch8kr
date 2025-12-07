@@ -12,12 +12,42 @@ export default function Home() {
           being migrated from the legacy Python bot to a modern Next.js-based
           interface.
         </p>
-        <div className="flex justify-center">
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-2xl mx-auto mb-8">
+          <div className="p-6 border border-gray-300 dark:border-gray-700 rounded-lg">
+            <h3 className="font-bold text-lg mb-2">✨ New Features</h3>
+            <ul className="space-y-1 text-sm text-gray-600 dark:text-gray-400">
+              <li>• Real-time card validation</li>
+              <li>• Animated result cards</li>
+              <li>• Batch processing (5 concurrent)</li>
+              <li>• Auto-save to Supabase</li>
+              <li>• Dark mode support</li>
+            </ul>
+          </div>
+          
+          <div className="p-6 border border-gray-300 dark:border-gray-700 rounded-lg">
+            <h3 className="font-bold text-lg mb-2">🚀 Plans Completed</h3>
+            <ul className="space-y-1 text-sm text-gray-600 dark:text-gray-400">
+              <li>• ✅ Input Card Component</li>
+              <li>• ✅ Result Grid with States</li>
+              <li>• ✅ Batch Processing Hook</li>
+              <li>• ✅ Supabase Persistence</li>
+            </ul>
+          </div>
+        </div>
+        
+        <div className="flex justify-center gap-4">
           <Link
-            href="/dashboard"
+            href="/checker"
             className="rounded-lg bg-blue-600 px-6 py-3 text-white font-semibold hover:bg-blue-700 transition-colors"
           >
-            Go to Dashboard
+            Try Card Checker
+          </Link>
+          <Link
+            href="/dashboard"
+            className="rounded-lg border border-gray-300 dark:border-gray-700 px-6 py-3 font-semibold hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+          >
+            View Dashboard
           </Link>
         </div>
       </div>
