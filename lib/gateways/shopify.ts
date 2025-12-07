@@ -9,6 +9,9 @@
  */
 
 import axios, { AxiosRequestConfig } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { getProxyManager } from '../proxy';
 
 /**
  * Card information interface
@@ -80,6 +83,16 @@ const DEFAULT_CHECKOUT_DATA: CheckoutData = {
 };
 
 /**
+ * Create appropriate proxy agent based on proxy URL
+ */
+function createProxyAgent(proxyUrl: string): HttpsProxyAgent | SocksProxyAgent {
+  if (proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks5h://')) {
+    return new SocksProxyAgent(proxyUrl);
+  }
+  return new HttpsProxyAgent(proxyUrl);
+}
+
+/**
  * Create a session with proper headers
  */
 function createSession(shopUrl: string, proxy?: string) {
@@ -100,7 +113,7 @@ function createSession(shopUrl: string, proxy?: string) {
 
   if (proxy) {
     config.proxy = false;
-    config.httpsAgent = require('https-proxy-agent')(proxy);
+    config.httpsAgent = createProxyAgent(proxy);
   }
 
   return { config, headers };
@@ -315,7 +328,7 @@ async function tokenizeCard(
 
     if (proxy) {
       config.proxy = false;
-      config.httpsAgent = require('https-proxy-agent')(proxy);
+      config.httpsAgent = createProxyAgent(proxy);
     }
 
     try {
@@ -346,6 +359,7 @@ async function tokenizeCard(
 /**
  * Main function to check a card using Shopify gateway
  * Simplified version of the full Shopify flow
+ * Now supports proxy rotation and request delays
  */
 export async function checkCardShopify(
   shopUrl: string,
@@ -353,60 +367,92 @@ export async function checkCardShopify(
   proxy?: string
 ): Promise<ShopifyCheckResult> {
   const normalizedUrl = normalizeShopUrl(shopUrl);
+  
+  // Get proxy manager
+  const proxyManager = await getProxyManager();
+  
+  // Use provided proxy or get next from manager
+  const proxyUrl = proxy || proxyManager.getNextProxy() || undefined;
 
-  // Step 1: Detect product
-  const product = await autoDetectCheapestProduct(normalizedUrl, proxy);
+  try {
+    // Wait for request delay if configured
+    await proxyManager.waitForDelay();
+    
+    // Step 1: Detect product
+    const product = await autoDetectCheapestProduct(normalizedUrl, proxyUrl);
 
-  if (!product) {
+    if (!product) {
+      if (proxyUrl) proxyManager.markFailure(proxyUrl);
+      return {
+        success: false,
+        response: {},
+        reason: 'No products found on site',
+      };
+    }
+
+    // Wait between requests
+    await proxyManager.waitForDelay();
+
+    // Step 2: Create checkout session
+    const { checkoutToken, sessionToken } = await createCheckoutSession(
+      normalizedUrl,
+      product.variant_id,
+      proxyUrl
+    );
+
+    if (!checkoutToken || !sessionToken) {
+      if (proxyUrl) proxyManager.markFailure(proxyUrl);
+      return {
+        success: false,
+        response: {},
+        reason: 'Failed to create checkout session',
+      };
+    }
+
+    // Wait between requests
+    await proxyManager.waitForDelay();
+
+    // Step 3: Tokenize card
+    const cardSessionId = await tokenizeCard(normalizedUrl, card, proxyUrl);
+
+    if (!cardSessionId) {
+      if (proxyUrl) proxyManager.markFailure(proxyUrl);
+      return {
+        success: false,
+        response: {},
+        reason: 'Failed to tokenize card',
+      };
+    }
+
+    // Mark proxy as successful
+    if (proxyUrl) proxyManager.markSuccess(proxyUrl);
+
+    // Note: Steps 4-5 (proposal and completion) are extremely complex
+    // and would require significant additional code. For now, we return
+    // a success indicator that the card was tokenized successfully.
+
+    console.log('[3/5] Card tokenized successfully');
+    console.log('[INFO] Full checkout flow not yet implemented');
+
+    return {
+      success: true,
+      response: {
+        checkout_token: checkoutToken,
+        session_token: sessionToken,
+        card_session_id: cardSessionId,
+        product,
+      },
+      reason: 'Card tokenized successfully (full flow pending)',
+      amount: `$${product.price_str}`,
+    };
+  } catch (error: any) {
+    // Mark proxy as failed on exception
+    if (proxyUrl) proxyManager.markFailure(proxyUrl);
+    
     return {
       success: false,
-      response: {},
-      reason: 'No products found on site',
+      response: { error: { message: error.message } },
+      reason: 'Network Error',
     };
   }
-
-  // Step 2: Create checkout session
-  const { checkoutToken, sessionToken } = await createCheckoutSession(
-    normalizedUrl,
-    product.variant_id,
-    proxy
-  );
-
-  if (!checkoutToken || !sessionToken) {
-    return {
-      success: false,
-      response: {},
-      reason: 'Failed to create checkout session',
-    };
-  }
-
-  // Step 3: Tokenize card
-  const cardSessionId = await tokenizeCard(normalizedUrl, card, proxy);
-
-  if (!cardSessionId) {
-    return {
-      success: false,
-      response: {},
-      reason: 'Failed to tokenize card',
-    };
-  }
-
-  // Note: Steps 4-5 (proposal and completion) are extremely complex
-  // and would require significant additional code. For now, we return
-  // a success indicator that the card was tokenized successfully.
-
-  console.log('[3/5] Card tokenized successfully');
-  console.log('[INFO] Full checkout flow not yet implemented');
-
-  return {
-    success: true,
-    response: {
-      checkout_token: checkoutToken,
-      session_token: sessionToken,
-      card_session_id: cardSessionId,
-      product,
-    },
-    reason: 'Card tokenized successfully (full flow pending)',
-    amount: `$${product.price_str}`,
-  };
 }

@@ -6,6 +6,9 @@
  */
 
 import axios, { AxiosRequestConfig } from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
+import { getProxyManager } from '../proxy';
 
 // Environment variables with working defaults from legacy Python bot (t2.py)
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY || 'AIzaSyCX5msqd223t0ZQgM3URQzLenKrmoQipIA';
@@ -66,6 +69,16 @@ export interface StripeConfirmationResult {
 }
 
 /**
+ * Create appropriate proxy agent based on proxy URL
+ */
+function createProxyAgent(proxyUrl: string): HttpsProxyAgent | SocksProxyAgent {
+  if (proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks5h://')) {
+    return new SocksProxyAgent(proxyUrl);
+  }
+  return new HttpsProxyAgent(proxyUrl);
+}
+
+/**
  * Format amount in cents to currency string
  */
 function formatAmount(amountCents: number | null, currencyCode: string = 'usd'): string | null {
@@ -96,7 +109,7 @@ export async function getFirebaseToken(
   // Add proxy if provided
   if (proxy) {
     config.proxy = false; // Disable default proxy
-    config.httpsAgent = require('https-proxy-agent')(proxy);
+    config.httpsAgent = createProxyAgent(proxy);
   }
 
   try {
@@ -154,7 +167,7 @@ async function getCheckoutInfo(
 
   if (proxy) {
     config.proxy = false;
-    config.httpsAgent = require('https-proxy-agent')(proxy);
+    config.httpsAgent = createProxyAgent(proxy);
   }
 
   try {
@@ -227,7 +240,7 @@ async function confirmStripePayment(
 
   if (proxy) {
     config.proxy = false;
-    config.httpsAgent = require('https-proxy-agent')(proxy);
+    config.httpsAgent = createProxyAgent(proxy);
   }
 
   try {
@@ -302,57 +315,101 @@ async function confirmStripePayment(
 /**
  * Main function to check a card using Stripe gateway
  * This is the high-level function that orchestrates the entire flow
+ * Now supports proxy rotation and request delays
  */
 export async function checkCardStripe(
   card: CardInfo,
   proxy?: string
 ): Promise<StripeConfirmationResult> {
-  // Step 1: Get fresh Firebase token and UID
-  const { token: freshToken, uid: newUid } = await getFirebaseToken(FIREBASE_API_KEY, proxy);
+  // Get proxy manager
+  const proxyManager = await getProxyManager();
+  
+  // Use provided proxy or get next from manager
+  const proxyUrl = proxy || proxyManager.getNextProxy() || undefined;
+  
+  try {
+    // Wait for request delay if configured
+    await proxyManager.waitForDelay();
+    
+    // Step 1: Get fresh Firebase token and UID
+    const { token: freshToken, uid: newUid } = await getFirebaseToken(FIREBASE_API_KEY, proxyUrl);
 
-  if (!freshToken || !newUid) {
+    if (!freshToken || !newUid) {
+      if (proxyUrl) proxyManager.markFailure(proxyUrl);
+      return {
+        success: false,
+        response: {},
+        reason: 'Failed to get Firebase token/UID',
+      };
+    }
+
+    console.log(`Processing card with UID: ${newUid}`);
+
+    // Wait between Firebase calls
+    await proxyManager.waitForDelay();
+
+    // Step 2: Get checkout info with payment intent
+    const checkoutData = await getCheckoutInfo(freshToken, newUid, proxyUrl);
+
+    if (!checkoutData || !checkoutData.result) {
+      if (proxyUrl) proxyManager.markFailure(proxyUrl);
+      return {
+        success: false,
+        response: {},
+        reason: 'Failed to get payment intent',
+      };
+    }
+
+    const { paymentIntent, clientSecret } = checkoutData.result;
+
+    if (!paymentIntent || !clientSecret) {
+      if (proxyUrl) proxyManager.markFailure(proxyUrl);
+      return {
+        success: false,
+        response: {},
+        reason: 'Failed to extract intent details',
+      };
+    }
+
+    console.log(`Card: ${card.number.slice(0, 6)}...${card.number.slice(-4)} | Intent: ${paymentIntent}`);
+
+    // Wait before final confirmation
+    await proxyManager.waitForDelay();
+
+    // Step 3: Confirm payment with card details
+    const result = await confirmStripePayment(paymentIntent, clientSecret, card, proxyUrl);
+
+    // Add formatted amount if available
+    if (result.response) {
+      const errorInfo = result.response.error || {};
+      const amount = errorInfo.payment_intent?.amount || result.response.amount || 0;
+      const currency = errorInfo.payment_intent?.currency || result.response.currency || 'usd';
+      result.amount = formatAmount(amount, currency) || undefined;
+    }
+
+    // Mark proxy success/failure based on result
+    if (proxyUrl) {
+      if (result.success) {
+        proxyManager.markSuccess(proxyUrl);
+      } else {
+        // Only mark failure for network errors, not card declines
+        if (result.reason === 'Network Error') {
+          proxyManager.markFailure(proxyUrl);
+        } else {
+          proxyManager.markSuccess(proxyUrl);
+        }
+      }
+    }
+
+    return result;
+  } catch (error: any) {
+    // Mark proxy as failed on exception
+    if (proxyUrl) proxyManager.markFailure(proxyUrl);
+    
     return {
       success: false,
-      response: {},
-      reason: 'Failed to get Firebase token/UID',
+      response: { error: { message: error.message } },
+      reason: 'Network Error',
     };
   }
-
-  console.log(`Processing card with UID: ${newUid}`);
-
-  // Step 2: Get checkout info with payment intent
-  const checkoutData = await getCheckoutInfo(freshToken, newUid, proxy);
-
-  if (!checkoutData || !checkoutData.result) {
-    return {
-      success: false,
-      response: {},
-      reason: 'Failed to get payment intent',
-    };
-  }
-
-  const { paymentIntent, clientSecret } = checkoutData.result;
-
-  if (!paymentIntent || !clientSecret) {
-    return {
-      success: false,
-      response: {},
-      reason: 'Failed to extract intent details',
-    };
-  }
-
-  console.log(`Card: ${card.number.slice(0, 6)}...${card.number.slice(-4)} | Intent: ${paymentIntent}`);
-
-  // Step 3: Confirm payment with card details
-  const result = await confirmStripePayment(paymentIntent, clientSecret, card, proxy);
-
-  // Add formatted amount if available
-  if (result.response) {
-    const errorInfo = result.response.error || {};
-    const amount = errorInfo.payment_intent?.amount || result.response.amount || 0;
-    const currency = errorInfo.payment_intent?.currency || result.response.currency || 'usd';
-    result.amount = formatAmount(amount, currency) || undefined;
-  }
-
-  return result;
 }
