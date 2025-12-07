@@ -47,9 +47,20 @@ function getSocks5Ports(): Set<number> {
  * @returns ParsedProxy object or null if invalid
  */
 export function parseProxy(proxyString: string): ParsedProxy | null {
-  const trimmed = proxyString.trim();
+  let trimmed = proxyString.trim();
   if (!trimmed) {
     return null;
+  }
+
+  // Strip protocol hints like (Http), (Socks4), (Socks5), etc.
+  // Example: "(Http)prox-ky.pointtoserver.com:10799:user:pass"
+  // Example: "(Socks5)174.77.111.198:49547"
+  let protocolHint: string | undefined;
+  const protocolHintMatch = trimmed.match(/^\(([^)]+)\)/i);
+  if (protocolHintMatch) {
+    protocolHint = protocolHintMatch[1].toLowerCase();
+    // Remove the hint from the string
+    trimmed = trimmed.substring(protocolHintMatch[0].length);
   }
 
   // Try URL format first (http://, https://, socks5://, socks5h://)
@@ -57,8 +68,8 @@ export function parseProxy(proxyString: string): ParsedProxy | null {
     return parseUrlFormat(trimmed);
   }
 
-  // Try host:port:username:password format
-  return parseColonFormat(trimmed);
+  // Try host:port or host:port:username:password format
+  return parseColonFormat(trimmed, protocolHint);
 }
 
 /**
@@ -119,18 +130,60 @@ function parseUrlFormat(proxyString: string): ParsedProxy | null {
 }
 
 /**
- * Parse colon-separated format (host:port:username:password)
- * Auto-detects SOCKS5 vs HTTP by port number
- * Parses from right to left to handle colons in passwords
+ * Parse colon-separated format (host:port or host:port:username:password)
+ * Auto-detects SOCKS5 vs HTTP by port number or uses protocol hint
+ * Parses from left to right to handle colons in passwords
  */
-function parseColonFormat(proxyString: string): ParsedProxy | null {
-  // Split into exactly 4 parts, but password can contain colons
-  // Format: host:port:username:password
-  // Parse right-to-left: find first 3 colons from the left, rest is password
+function parseColonFormat(proxyString: string, protocolHint?: string): ParsedProxy | null {
+  // Count colons to determine format
+  const colonCount = (proxyString.match(/:/g) || []).length;
+  
+  // Format 1: host:port (no authentication)
+  if (colonCount === 1) {
+    const [host, portStr] = proxyString.split(':');
+    const port = parseInt(portStr);
+    
+    if (!host || isNaN(port)) {
+      console.error(`Invalid host or port in proxy: ${proxyString}`);
+      return null;
+    }
+    
+    // Use protocol hint if provided, otherwise auto-detect
+    let protocol: string;
+    if (protocolHint) {
+      // Map hint to protocol (socks4 -> socks5 since we don't have socks4 support)
+      if (protocolHint === 'socks4' || protocolHint === 'socks5') {
+        protocol = 'socks5';
+      } else {
+        protocol = 'http';
+      }
+    } else {
+      // Auto-detect by port
+      const socks5Ports = getSocks5Ports();
+      protocol = socks5Ports.has(port) ? 'socks5' : 'http';
+    }
+    
+    // Build proxy URL without authentication
+    const url = `${protocol}://${host}:${port}`;
+    const masked = `${protocol}://${host}:${port}`;
+    
+    return {
+      url,
+      protocol,
+      host,
+      port,
+      username: undefined,
+      password: undefined,
+      masked,
+    };
+  }
+  
+  // Format 2: host:port:username:password (with authentication)
+  // Parse left-to-right: find first 3 colons from the left, rest is password
   
   const firstColon = proxyString.indexOf(':');
   if (firstColon === -1) {
-    console.error(`Invalid proxy format (expected host:port:user:pass): ${proxyString}`);
+    console.error(`Invalid proxy format: ${proxyString}`);
     return null;
   }
   
@@ -139,7 +192,7 @@ function parseColonFormat(proxyString: string): ParsedProxy | null {
   
   const secondColon = remainder.indexOf(':');
   if (secondColon === -1) {
-    console.error(`Invalid proxy format (expected host:port:user:pass): ${proxyString}`);
+    console.error(`Invalid proxy format: ${proxyString}`);
     return null;
   }
   
@@ -162,9 +215,20 @@ function parseColonFormat(proxyString: string): ParsedProxy | null {
     return null;
   }
 
-  // Auto-detect protocol by port
-  const socks5Ports = getSocks5Ports();
-  const protocol = socks5Ports.has(port) ? 'socks5' : 'http';
+  // Use protocol hint if provided, otherwise auto-detect
+  let protocol: string;
+  if (protocolHint) {
+    // Map hint to protocol (socks4 -> socks5 since we don't have socks4 support)
+    if (protocolHint === 'socks4' || protocolHint === 'socks5') {
+      protocol = 'socks5';
+    } else {
+      protocol = 'http';
+    }
+  } else {
+    // Auto-detect by port
+    const socks5Ports = getSocks5Ports();
+    protocol = socks5Ports.has(port) ? 'socks5' : 'http';
+  }
 
   // URL-encode username and password
   const encodedUser = encodeURIComponent(username);
