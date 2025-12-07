@@ -40,8 +40,12 @@ export class ProxyManager {
 
   constructor(config: ProxyManagerConfig = {}) {
     this.maxConsecutiveFailures = config.maxConsecutiveFailures || 3;
+    
+    // Parse and validate REQUEST_DELAY_MS
+    const delayEnv = process.env.REQUEST_DELAY_MS;
+    const parsedDelay = delayEnv ? parseInt(delayEnv) : 2000;
     this.requestDelayMs = config.requestDelayMs || 
-      parseInt(process.env.REQUEST_DELAY_MS || '2000');
+      (!isNaN(parsedDelay) && parsedDelay > 0 ? parsedDelay : 2000);
   }
 
   /**
@@ -89,12 +93,6 @@ export class ProxyManager {
   async loadProxiesFromFile(filePath: string): Promise<void> {
     try {
       const resolvedPath = path.resolve(filePath);
-      
-      if (!fs.existsSync(resolvedPath)) {
-        console.error(`Proxy file not found: ${resolvedPath}`);
-        return;
-      }
-
       const content = fs.readFileSync(resolvedPath, 'utf-8');
       const lines = content.split('\n');
       const parsed: ParsedProxy[] = [];
@@ -115,8 +113,12 @@ export class ProxyManager {
 
       this.addProxies(parsed);
       console.log(`Loaded ${parsed.length} proxies from ${filePath}`);
-    } catch (error) {
-      console.error(`Error loading proxies from file ${filePath}:`, error);
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        console.error(`Proxy file not found: ${filePath}`);
+      } else {
+        console.error(`Error loading proxies from file ${filePath}:`, error.message);
+      }
     }
   }
 

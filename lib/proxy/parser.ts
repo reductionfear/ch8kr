@@ -76,7 +76,21 @@ function parseUrlFormat(proxyString: string): ParsedProxy | null {
     }
 
     const host = url.hostname;
-    const port = parseInt(url.port);
+    
+    // Handle default ports if not specified
+    let port: number;
+    if (url.port) {
+      port = parseInt(url.port);
+    } else {
+      // Default ports by protocol
+      if (protocol === 'https') {
+        port = 443;
+      } else if (protocol === 'socks5' || protocol === 'socks5h') {
+        port = 1080;
+      } else {
+        port = 80;
+      }
+    }
 
     if (!host || isNaN(port)) {
       console.error(`Invalid proxy URL: ${proxyString}`);
@@ -107,20 +121,44 @@ function parseUrlFormat(proxyString: string): ParsedProxy | null {
 /**
  * Parse colon-separated format (host:port:username:password)
  * Auto-detects SOCKS5 vs HTTP by port number
+ * Parses from right to left to handle colons in passwords
  */
 function parseColonFormat(proxyString: string): ParsedProxy | null {
-  const parts = proxyString.split(':');
-
-  if (parts.length !== 4) {
+  // Split into exactly 4 parts, but password can contain colons
+  // Format: host:port:username:password
+  // Parse right-to-left: find first 3 colons from the left, rest is password
+  
+  const firstColon = proxyString.indexOf(':');
+  if (firstColon === -1) {
     console.error(`Invalid proxy format (expected host:port:user:pass): ${proxyString}`);
     return null;
   }
-
-  const [host, portStr, username, password] = parts;
+  
+  const host = proxyString.substring(0, firstColon);
+  const remainder = proxyString.substring(firstColon + 1);
+  
+  const secondColon = remainder.indexOf(':');
+  if (secondColon === -1) {
+    console.error(`Invalid proxy format (expected host:port:user:pass): ${proxyString}`);
+    return null;
+  }
+  
+  const portStr = remainder.substring(0, secondColon);
+  const remainder2 = remainder.substring(secondColon + 1);
+  
+  const thirdColon = remainder2.indexOf(':');
+  if (thirdColon === -1) {
+    console.error(`Invalid proxy format (expected host:port:user:pass): ${proxyString}`);
+    return null;
+  }
+  
+  const username = remainder2.substring(0, thirdColon);
+  const password = remainder2.substring(thirdColon + 1);
+  
   const port = parseInt(portStr);
 
-  if (!host || isNaN(port)) {
-    console.error(`Invalid host or port in proxy: ${proxyString}`);
+  if (!host || isNaN(port) || !username || !password) {
+    console.error(`Invalid host, port, username, or password in proxy: ${proxyString}`);
     return null;
   }
 
