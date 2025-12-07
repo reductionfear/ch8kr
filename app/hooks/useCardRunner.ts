@@ -76,12 +76,23 @@ export function useCardRunner(concurrencyLimit: number = 5) {
     const cardId = `${card.number}-${Date.now()}-${Math.random()}`;
 
     try {
+      // Format request to match API endpoint's expected interface
+      const requestBody = {
+        card: {
+          number: card.number,
+          exp_month: String(card.month),
+          exp_year: String(card.year),
+          cvc: card.cvv,
+        },
+        gateway: 'stripe' as const, // Default to stripe gateway
+      };
+
       const response = await fetch('/api/check', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(card),
+        body: JSON.stringify(requestBody),
         signal,
       });
 
@@ -198,20 +209,30 @@ export function useCardRunner(concurrencyLimit: number = 5) {
                 }
                 // Already handled in checkCard, just pass through
                 return error;
+              })
+              .finally(() => {
+                // Remove this promise from active array when done
+                const idx = active.indexOf(promise);
+                if (idx > -1) {
+                  active.splice(idx, 1);
+                }
               });
 
             active.push(promise);
           }
 
-          // Wait for at least one to complete
-          if (active.length > 0) {
-            const completed = await Promise.race(active);
-            const index = active.indexOf(Promise.resolve(completed));
-            active.splice(index, 1);
+          // Wait for at least one to complete if we have active promises
+          if (active.length > 0 && queue.length === 0) {
+            // Wait for all remaining if queue is empty
+            await Promise.all(active);
+          } else if (active.length >= concurrencyLimit) {
+            // Wait for at least one when at capacity
+            await Promise.race(active);
           }
         }
 
-        // Wait for all remaining
+        // This is now redundant as we wait in the loop above
+        // But keeping for safety
         if (active.length > 0) {
           await Promise.all(active);
         }

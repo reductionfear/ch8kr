@@ -158,7 +158,7 @@ export function CheckerInputCard({ onCardsExtracted }: CheckerInputCardProps) {
         <textarea
           value={inputText}
           onChange={handleInputChange}
-          placeholder="Paste cards here (one per line)&#10;Format: 4242424242424242|12|2025|123"
+          placeholder={"Paste cards here (one per line)\nFormat: 4242424242424242|12|2025|123"}
           className="w-full h-64 p-4 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
       </div>
