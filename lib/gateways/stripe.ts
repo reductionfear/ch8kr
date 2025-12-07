@@ -71,7 +71,7 @@ export interface StripeConfirmationResult {
 /**
  * Create appropriate proxy agent based on proxy URL
  */
-function createProxyAgent(proxyUrl: string): HttpsProxyAgent | SocksProxyAgent {
+function createProxyAgent(proxyUrl: string) {
   if (proxyUrl.startsWith('socks5://') || proxyUrl.startsWith('socks5h://')) {
     return new SocksProxyAgent(proxyUrl);
   }
