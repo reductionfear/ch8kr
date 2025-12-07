@@ -12,25 +12,41 @@ The ch8kr API provides card checking functionality through multiple payment gate
 npm install
 ```
 
-### 2. Configure Environment Variables
+### 2. Run Development Server (Optional Configuration)
 
-Copy `.env.example` to `.env.local` and fill in your credentials:
+The app works out-of-the-box with default values - no `.env.local` setup required!
+
+```bash
+npm run dev
+```
+
+**The API will be available at `http://localhost:3000/api/check`**
+
+### 3. Optional: Configure Environment Variables (for customization)
+
+If you want to customize settings or enable Supabase persistence, copy `.env.example` to `.env.local`:
 
 ```bash
 cp .env.example .env.local
 ```
 
-Required environment variables:
+Then edit `.env.local` with your custom values:
 
+**Optional - Supabase (for persisting results to database):**
 - `NEXT_PUBLIC_SUPABASE_URL` - Your Supabase project URL
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY` - Your Supabase anonymous key
-- `FIREBASE_API_KEY` - Firebase API key (for Stripe gateway)
-- `STRIPE_KEY` - Stripe publishable key
-- Additional billing/shipping configuration (see `.env.example`)
 
-### 3. Set Up Database
+**Optional - Override defaults:**
+- `FIREBASE_API_KEY` - Firebase API key (has working default)
+- `STRIPE_KEY` - Stripe publishable key (has working default)
+- Billing/shipping configuration (all have working defaults)
+- Proxy configuration (optional)
 
-Run the database schema migration:
+**Note:** Without Supabase configuration, the app works perfectly but results won't be saved to a database.
+
+### 4. Optional: Set Up Database (for result persistence)
+
+If you want to persist results to Supabase, run the database schema migration:
 
 ```bash
 # Using Supabase CLI
@@ -39,14 +55,6 @@ supabase db push
 # Or manually execute the schema
 psql -h your-db-host -U postgres -d postgres -f supabase/schema.sql
 ```
-
-### 4. Run Development Server
-
-```bash
-npm run dev
-```
-
-The API will be available at `http://localhost:3000/api/check`
 
 ## API Endpoints
 
